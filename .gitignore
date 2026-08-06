@@ -1,0 +1,17 @@
+﻿# Secrets and local config
+.env
+
+# Cached source documents and generated output
+reports/
+*.pdf
+*_10-K_*.txt
+register.html
+register.csv
+register.json
+
+__pycache__/
+*.pyc
+
+# Reference material, not ours to publish
+*.jpg
+*.png
