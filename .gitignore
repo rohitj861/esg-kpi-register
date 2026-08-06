@@ -15,3 +15,5 @@ __pycache__/
 # Reference material, not ours to publish
 *.jpg
 *.png
+.vercel
+.env*

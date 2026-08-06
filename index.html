@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESG KPI Register</title>
+<style>
+:root { --ink:#111; --muted:#6b7280; --line:#e5e7eb; --bg:#fff; --accent:#1d4ed8; --warn:#b45309; }
+@media (prefers-color-scheme: dark) {
+  :root { --ink:#e8e8ea; --muted:#9aa1ab; --line:#2c2f36; --bg:#0f1115; --accent:#7aa2ff; --warn:#fbbf24; }
+}
+* { box-sizing:border-box; }
+body { margin:0; padding:2.5rem 1.5rem 4rem; background:var(--bg); color:var(--ink);
+       font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+.wrap { max-width:1250px; margin:0 auto; }
+.eyebrow { font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); }
+h1 { font-size:2rem; margin:.4rem 0 .5rem; letter-spacing:-.02em; }
+.lede { color:var(--muted); margin:0 0 1.5rem; max-width:62ch; }
+.bar { display:flex; gap:1.25rem; align-items:baseline; flex-wrap:wrap;
+       margin-bottom:1.25rem; font-size:12.5px; color:var(--muted); }
+.scroll { overflow-x:auto; border:1px solid var(--line); border-radius:10px; }
+table { border-collapse:collapse; width:100%; min-width:820px; }
+th, td { text-align:left; padding:.65rem .8rem; border-bottom:1px solid var(--line); vertical-align:top; }
+thead th { position:sticky; top:0; background:var(--bg); font-size:12px; font-weight:600;
+           color:var(--muted); border-bottom:1px solid var(--line); }
+tbody tr:last-child td { border-bottom:none; }
+td.num { font-variant-numeric:tabular-nums; white-space:nowrap; }
+.metric { font-weight:600; }
+.metric small { display:block; font-weight:400; color:var(--muted); font-size:11px; margin-top:.15rem; }
+.val { font-weight:600; }
+.prov { color:var(--muted); font-size:11px; margin-top:.15rem; }
+.prov a { color:var(--accent); text-decoration:none; }
+.prov a:hover { text-decoration:underline; }
+.miss { color:var(--muted); }
+.flag { color:var(--warn); font-size:11px; margin-top:.15rem; max-width:22ch; }
+.group td { background:color-mix(in srgb, var(--ink) 4%, transparent); font-size:11px;
+            letter-spacing:.12em; text-transform:uppercase; color:var(--muted); font-weight:600; }
+.note { margin-top:1.5rem; color:var(--muted); font-size:12.5px; max-width:78ch; }
+.state { padding:3rem 0; color:var(--muted); }
+.err { color:#b91c1c; }
+@media (prefers-color-scheme: dark) { .err { color:#f87171; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">Primary-source data</div>
+  <h1>Sustainability KPIs, traced to the filing.</h1>
+  <p class="lede">Every figure is extracted from a company's own annual and
+  sustainability reports. Each value links to the page it was read from.</p>
+  <div class="bar" id="bar"></div>
+  <div id="out"><div class="state">Loading…</div></div>
+  <p class="note"><strong>Reading the years.</strong> Financial figures come from the
+  Form 10-K and environmental figures from a separate sustainability report. The two are
+  published on different cycles, so a company's emissions year usually trails its financial
+  year. Each cell states the year it belongs to — a row is not a single period. Scope 2 is
+  market-based where a company reports both. An empty cell means the company does not
+  publish that metric; no similar figure is substituted in its place.</p>
+</div>
+
+<script>
+const fmt = v => v === null || v === undefined ? "—" : Number(v).toLocaleString("en-US",
+  { maximumFractionDigits: Number(v) < 1000 ? 2 : 0 });
+
+function link(row) {
+  if (!row.source_url) return row.page ? `p.${row.page}` : "";
+  const href = row.source_url.toLowerCase().endsWith(".pdf") && row.page
+    ? `${row.source_url}#page=${row.page}` : row.source_url;
+  return `<a href="${href}" target="_blank" rel="noopener">${row.page ? "p." + row.page : "source"} ↗</a>`;
+}
+
+fetch("/api/register")
+  .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.error || r.status)))
+  .then(({ rows, fetchedAt }) => {
+    if (!rows.length) { document.getElementById("out").innerHTML =
+      '<div class="state">No data yet — run the ingest pipeline.</div>'; return; }
+
+    const tickers = [...new Set(rows.map(r => r.ticker))].sort();
+    const names = Object.fromEntries(rows.map(r => [r.ticker, r.company]));
+    const metrics = [];
+    for (const r of rows) if (!metrics.some(m => m.metric === r.metric))
+      metrics.push({ metric: r.metric, kind: r.kind, unit: r.unit, order: r.display_order });
+    metrics.sort((a, b) => a.order - b.order);
+
+    const cell = (metric, ticker) => {
+      const r = rows.find(x => x.metric === metric && x.ticker === ticker);
+      if (!r) return '<td class="num miss">—</td>';
+      return `<td class="num"><span class="val">${fmt(r.value)}</span>
+        <div class="prov">${r.reporting_year ?? "—"} · ${link(r)}</div>
+        ${r.note ? `<div class="flag">⚠ ${r.note}</div>` : ""}</td>`;
+    };
+
+    let body = "", lastKind = null;
+    for (const m of metrics) {
+      if (m.kind !== lastKind) {
+        body += `<tr class="group"><td colspan="${tickers.length + 1}">${m.kind}</td></tr>`;
+        lastKind = m.kind;
+      }
+      body += `<tr><td class="metric">${m.metric}<small>${m.unit}</small></td>` +
+              tickers.map(t => cell(m.metric, t)).join("") + "</tr>";
+    }
+
+    document.getElementById("out").innerHTML = `<div class="scroll"><table>
+      <thead><tr><th>Metric</th>${tickers.map(t =>
+        `<th>${names[t]}<br><span style="font-weight:400">${t}</span></th>`).join("")}</tr></thead>
+      <tbody>${body}</tbody></table></div>`;
+
+    const flagged = rows.filter(r => r.note).length;
+    document.getElementById("bar").innerHTML =
+      `<span><strong>${tickers.length}</strong> companies</span>
+       <span><strong>${metrics.length}</strong> metrics</span>
+       <span><strong>${rows.length}</strong> traced values</span>
+       ${flagged ? `<span style="color:var(--warn)">${flagged} flagged for review</span>` : ""}
+       <span>updated ${new Date(fetchedAt).toLocaleString()}</span>`;
+  })
+  .catch(e => {
+    document.getElementById("out").innerHTML =
+      `<div class="state err">Could not load the register: ${e}</div>`;
+  });
+</script>
+</body>
+</html>

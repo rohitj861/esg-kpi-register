@@ -1,0 +1,10 @@
+﻿# Only the web front end and its API function are deployed.
+*.py
+reports/
+__pycache__/
+register.csv
+register.json
+register.html
+*.pdf
+*.jpg
+.env
