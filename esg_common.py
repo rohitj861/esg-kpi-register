@@ -6,6 +6,22 @@ import re
 NUMBER = r"\(?-?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\$?\s?\d+\.\d+\)?|\b\d{4,}\b"
 YEAR = re.compile(r"\b(19|20)\d{2}\b")
 
+# The register's metric vocabulary, in display order. Extraction may find more
+# than this — renewable electricity in MWh is read only to derive a share — so
+# the list lives here rather than in any one writer and every consumer filters
+# through it.
+FINANCIAL_METRICS = ["Revenue", "Net income", "Total assets", "Employees"]
+ENVIRONMENTAL_METRICS = [
+    "Scope 1", "Scope 2 (market-based)", "Scope 2 (location-based)", "Scope 3",
+    "Energy consumption", "Water withdrawal", "Renewable energy share",
+]
+REGISTER_METRICS = FINANCIAL_METRICS + ENVIRONMENTAL_METRICS
+
+
+def kind_of(label):
+    """Which half of the register a metric belongs to."""
+    return "financial" if label in FINANCIAL_METRICS else "environmental"
+
 # Scale words that may appear in a statement header, e.g. "(in millions)".
 SCALES = (
     (re.compile(r"(?i)\bin\s+billions\b"), 1_000_000_000),
@@ -193,10 +209,8 @@ def row_values(lines, index, max_span=18, relaxed=False, expect=None):
     footnote marker — we retry permissively and accept that read only if it fills
     the columns exactly. A partial match stays rejected rather than guessed.
     """
-    def gather(extract):
-        inline = extract(clean_row(lines[index]))
-        if inline:
-            return inline
+    def below(extract):
+        """Numeric cells on the lines under the label, up to the next label."""
         values = []
         for j in range(index + 1, min(len(lines), index + max_span)):
             line = lines[j].strip()
@@ -207,8 +221,22 @@ def row_values(lines, index, max_span=18, relaxed=False, expect=None):
             values.extend(extract(line))
         return values
 
+    def gather(extract):
+        return extract(clean_row(lines[index])) or below(extract)
+
     if relaxed:
-        return gather(numbers_in_relaxed)
+        values = gather(numbers_in_relaxed)
+        # A permissive read counts a footnote marker printed after the label.
+        # Microsoft's share row is a split layout whose label line is
+        # "renewable electricity 1", so the marker is the only thing found
+        # inline and the six real cells sit below it. One number is not a row,
+        # so when the inline read cannot fill the year columns, prefer whatever
+        # the lines beneath actually hold.
+        if expect and len(values) < expect:
+            beneath = below(numbers_in_relaxed)
+            if len(beneath) > len(values):
+                return beneath
+        return values
 
     strict = gather(numbers_in)
     # Only retry permissively for a line that already looks like a data row.
@@ -268,6 +296,12 @@ def human(value, unit=""):
     return f"{value:,.0f}"
 
 
-def full(value):
-    """Absolute figure with thousands separators, as shown in the KPI register."""
-    return "—" if value is None else f"{value:,.0f}"
+def full(value, unit=""):
+    """Absolute figure with thousands separators, as shown in the KPI register.
+
+    Shares are the exception: rounding a renewable energy share of 64.4% to a
+    whole number throws away the only precision the figure has.
+    """
+    if value is None:
+        return "—"
+    return f"{value:,.1f}" if unit == "%" else f"{value:,.0f}"

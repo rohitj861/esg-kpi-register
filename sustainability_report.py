@@ -24,7 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from esg_common import Metric, looks_like_prose, pick_latest, row_values, year_columns
+from esg_common import Metric, full, looks_like_prose, pick_latest, row_values, year_columns
 
 USER_AGENT = os.environ.get(
     "ESG_USER_AGENT",
@@ -56,6 +56,18 @@ REPORT_REGISTRY = {
         "url": "https://sustainability.aboutamazon.com/2025-amazon-sustainability-report.pdf",
         "title": "Amazon {year} Sustainability Report",
         "page": "https://sustainability.aboutamazon.com/reporting",
+    },
+    "MSFT": {
+        # Microsoft splits its reporting in two: a narrative report and a Data
+        # Fact Sheet that carries the tables. Only the fact sheet holds
+        # extractable KPI rows — the narrative PDF yields none — so that is what
+        # the register reads. Its landing page renders the links with JavaScript
+        # and returns nothing scrapeable, which makes the recorded URL and the
+        # year-bump the only routes to a newer edition.
+        "url": "https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/microsoft/"
+               "msc/documents/presentations/CSR/2026-Microsoft-Environmental-Data-Fact-Sheet-PDF.pdf",
+        "title": "Microsoft {year} Environmental Data Fact Sheet",
+        "page": "https://www.microsoft.com/en-us/corporate-responsibility/topics/sustainability/report/",
     },
     "NVDA": {
         "url": "https://images.nvidia.com/aem-dam/Solutions/documents/"
@@ -112,11 +124,15 @@ SUBSCRIPTS = str.maketrans({"₂": "2", "₃": "3", " ": " ", " ": " "})
 
 # Resource-use KPIs. Unlike GHG scopes these are barely standardised, so each
 # metric lists the exact total rows worth trusting. A near-miss is deliberately
-# not accepted: "waste diverted from landfill" is not "waste generated", and
-# "renewable electricity used" is not total energy consumption. Where a company
-# publishes no matching total the value stays empty rather than becoming wrong.
+# not accepted: "renewable electricity used" is not total energy consumption.
+# Where a company publishes no matching total the value stays empty rather than
+# becoming wrong.
 WATER_UNITS = [
     (r"(?i)megalit(?:er|re)s", 1_000.0),
+    # Case-sensitive on purpose: Microsoft captions its water table "(ML)" and
+    # spells the abbreviation out only in the key underneath. Lowercase "ml" is
+    # millilitres, a factor of a million away.
+    (r"\bML\b", 1_000.0),
     (r"(?i)cubic\s+met(?:er|re)s|\bm3\b", 1.0),
     (r"(?i)\bMgal\b", 3_785.411784),
     (r"(?i)\bgallons?\b", 0.003785411784),
@@ -132,12 +148,6 @@ MAGNITUDES = [
     (r"(?i)\bmillions?\b", 1_000_000.0),
     (r"(?i)\bthousands?\b", 1_000.0),
 ]
-WASTE_UNITS = [
-    (r"(?i)metric\s+tons?|\btonnes?\b", 1.0),
-    (r"(?i)short\s+tons?", 0.90718474),
-    (r"(?i)\bpounds?\b|\blbs?\b", 0.00045359237),
-    (r"(?i)kilograms?|\bkg\b", 0.001),
-]
 ENERGY_UNITS = [
     (r"(?i)\bTWh\b|terawatt[-\s]hours?", 1_000_000.0),
     (r"(?i)\bGWh\b|gigawatt[-\s]hours?", 1_000.0),
@@ -146,7 +156,10 @@ ENERGY_UNITS = [
     (r"(?i)\bGJ\b|gigajoules?", 0.2777778),
 ]
 
-PERCENT_UNITS = [(r"(?i)%|\bpercent\b", 1.0)]
+# "Percentage" is a word publishers use as the unit itself — Microsoft's row is
+# labelled "Percentage of direct renewable electricity" and no % sign appears
+# anywhere near it — so the stem has to match, not just the bare word.
+PERCENT_UNITS = [(r"(?i)%|\bpercent\w*", 1.0)]
 
 RESOURCE_ROWS = {
     "Water withdrawal": {
@@ -161,43 +174,42 @@ RESOURCE_ROWS = {
         "units": WATER_UNITS,
         "canonical": "m3",
     },
-    "Water consumption": {
-        # Google splits the label across the row: "Water  Million  … consumption gallons".
-        "patterns": [r"Total\s+water\s+consum\w*", r"\bWater\b[^\n]*\bconsumption\b"],
-        "units": WATER_UNITS,
-        "canonical": "m3",
-    },
-    "Waste diverted": {
-        # Deliberately strict: Google prints per-site "Waste diverted" rows with no
-        # company total, and matching those would report a fraction as the whole.
-        "patterns": [r"Total\s+waste\s+diverted\b", r"Waste\s+diverted\s+from\s+landfill\b"],
-        "units": WASTE_UNITS,
-        "canonical": "metric tons",
-    },
-    "Waste diversion rate": {
-        "patterns": [r"Total\s+waste\s+diversion\s+rate\b", r"Waste\s+diversion\s+rate\b"],
-        "units": PERCENT_UNITS,
-        "canonical": "%",
-    },
-    "Renewable electricity": {
-        "patterns": [r"Total\s+renewable\s+electricity\b", r"Renewable\s+electricity\s+used\b"],
+    "Energy consumption": {
+        # The trailing \d* swallows a footnote marker printed hard against the
+        # label — Microsoft's row reads "Total energy consumption1", and \b alone
+        # never matches between "n" and "1".
+        "patterns": [
+            r"^\s*Total\s+energy\s+consumption\d*\b",
+            r"^\s*Total\s+electricity\s+consumption\d*\b",
+        ],
         "units": ENERGY_UNITS,
         "canonical": "MWh",
     },
-    "Waste generated": {
+    # The share as the company states it. Publishers write this a dozen ways —
+    # "Renewable electricity (%)", "% of electricity from renewable sources",
+    # "Carbon-free energy percentage" — so the label patterns are broad and the
+    # unit table does the filtering: a row only counts when a % sign or the word
+    # "percent" sits on it or in the caption directly above.
+    "Renewable energy share": {
         "patterns": [
-            r"^\s*Total\s+waste\s+generated\b",
-            r"^\s*Total\s+waste\b(?!.*divert)",
-            r"^\s*Waste\s+generated\b",
+            r"(?:Percent\w*|Share|Proportion)\s+(?:of\s+)?(?:total\s+)?"
+            r"(?:electricity|energy|power)[^\n]{0,40}\brenewable",
+            # Google: "Electricity procured from renewable sources % 100 100 …"
+            r"^\s*(?:Total\s+)?(?:Electricity|Energy|Power)\b[^\n]{0,50}"
+            r"\bfrom\s+renewable\b",
+            r"(?:Renewable|Carbon[-\s]free|Clean)\s+(?:electricity|energy|power)"
+            r"[^\n]{0,40}(?:\(\s*%\s*\)|\bpercent\w*|\bshare\b)",
+            r"^\s*(?:%|Percent\w*)\s+(?:of\s+\w+\s+)?(?:from\s+)?renewable\b",
+            r"^\s*(?:Renewable|Carbon[-\s]free)\s+(?:electricity|energy|power)\b"
+            r"(?!.*\b(?:MWh|GWh|TWh|kWh)\b)",
         ],
-        "units": WASTE_UNITS,
-        "canonical": "metric tons",
+        "units": PERCENT_UNITS,
+        "canonical": "%",
     },
-    "Energy consumption": {
-        "patterns": [
-            r"^\s*Total\s+energy\s+consumption\b",
-            r"^\s*Total\s+electricity\s+consumption\b",
-        ],
+    # Not published in the register, but kept because it is the input that lets a
+    # share be derived when the report prints the megawatt-hours and no ratio.
+    "Renewable electricity": {
+        "patterns": [r"Total\s+renewable\s+electricity\b", r"Renewable\s+electricity\s+used\b"],
         "units": ENERGY_UNITS,
         "canonical": "MWh",
     },
@@ -462,11 +474,53 @@ def extract_emissions(pages, source=""):
                 if matched_this_pattern:
                     break
 
-    return {
+    return derive_renewable_share({
         label: max(found, key=lambda c: c[:-1])[-1]
         for label, found in candidates.items()
         if found
-    }
+    })
+
+
+def derive_renewable_share(metrics):
+    """Fall back to renewable electricity ÷ energy consumption when no share is stated.
+
+    Plenty of reports print both totals in megawatt-hours and never the ratio.
+    Computing it is safe only when the two figures describe the same year, so a
+    2025 renewable total is never divided by a 2024 denominator. The result is
+    marked in its note as derived, because unlike every other value in the
+    register it appears on no page of the report.
+
+    The two rows need not share a boundary — "total energy" includes fuels while
+    the numerator is electricity only — so the share is a floor, and the note
+    names both source pages so it can be checked.
+    """
+    if "Renewable energy share" in metrics:
+        return metrics
+
+    renewable = metrics.get("Renewable electricity")
+    total = metrics.get("Energy consumption")
+    if not renewable or not total or not total.value:
+        return metrics
+    if renewable.year != total.year:
+        return metrics
+
+    share = renewable.value / total.value * 100
+    if not 0 < share <= 100:
+        return metrics
+
+    metrics["Renewable energy share"] = Metric(
+        name="Renewable energy share",
+        value=share,
+        unit="%",
+        year=renewable.year,
+        page=renewable.page,
+        source=renewable.source,
+        note=(
+            f"derived, not stated in the report: renewable electricity (p.{renewable.page}) "
+            f"÷ energy consumption (p.{total.page})"
+        ),
+    )
+    return metrics
 
 
 def convert_resource(value, lines, index, unit_table, lookback=3):
@@ -517,14 +571,28 @@ def supplier_context(lines, index, lookback=12):
     return 0
 
 
+# Resource labels are short: "Total water withdrawals", "Percentage of direct
+# renewable electricity", "Electricity procured from renewable sources %" — the
+# longest seen runs to seven words. Footnotes that restate a total in another
+# unit are longer, and one of Microsoft's breaks across lines such that a
+# fragment begins "total energy consumption equals 134,861,314 GJ, and total
+# non-renewable fuel consumed equals 1,519,571 GJ" — a sentence that reads as a
+# two-column row and would report the fuel figure as the company's energy total.
+# The general prose cap is too generous to catch it, so resource rows use a
+# tighter one.
+RESOURCE_LABEL_WORDS = 9
+
+
 def extract_resources(lines, page_number, source):
-    """Find water, waste, and energy totals on one page of a report."""
+    """Find water, energy, and renewable-share totals on one page of a report."""
     found = []
     for label, spec in RESOURCE_ROWS.items():
         for rank, pattern in enumerate(spec["patterns"]):
             matched = []
             for i, line in enumerate(lines):
-                if not re.search(pattern, line, re.IGNORECASE) or looks_like_prose(line):
+                if not re.search(pattern, line, re.IGNORECASE) or looks_like_prose(
+                    line, max_words=RESOURCE_LABEL_WORDS
+                ):
                     continue
                 years = year_columns(lines, i, lookback=40)
                 values = row_values(
@@ -540,9 +608,21 @@ def extract_resources(lines, page_number, source):
                 converted, unit_text = convert_resource(value, lines, i, spec["units"])
                 if converted is None:
                     continue
+                # A share is bounded. A stray % elsewhere on a megawatt-hour row
+                # would otherwise let 3,737,000 through as a percentage.
+                if spec["canonical"] == "%" and not 0 <= converted <= 100:
+                    continue
                 aligned = len(values) == len(years)
                 note = "" if aligned else "column alignment uncertain — verify against source page"
-                if unit_text and unit_text.strip().lower() not in spec["canonical"].lower():
+                # A share is never rescaled — every entry in PERCENT_UNITS is a
+                # factor of one — so matching the word "Percentage" rather than a
+                # "%" sign is not a conversion and must not be reported as one.
+                converted_units = (
+                    spec["canonical"] != "%"
+                    and unit_text
+                    and unit_text.strip().lower() not in spec["canonical"].lower()
+                )
+                if converted_units:
                     note = "; ".join(
                         n for n in (note, f"converted from {unit_text.strip()}") if n
                     )
@@ -664,13 +744,14 @@ def main():
     if not metrics:
         print("  no environmental data tables found")
     for label in ("Scope 1", "Scope 2 (market-based)", "Scope 2 (location-based)", "Scope 3",
-                  "Water withdrawal", "Water consumption", "Waste generated", "Waste diverted",
-                  "Waste diversion rate", "Energy consumption", "Renewable electricity"):
+                  "Energy consumption", "Water withdrawal", "Renewable energy share",
+                  "Renewable electricity"):
         m = metrics.get(label)
         if m is None:
             print(f"  {label + ':':<26} not found")
         else:
-            print(f"  {label + ':':<26} {m.value:>14,.0f} {m.unit:<8} {m.year or ''} p.{m.page}")
+            print(f"  {label + ':':<26} {full(m.value, m.unit):>14} {m.unit:<8} "
+                  f"{m.year or ''} p.{m.page}")
 
 
 if __name__ == "__main__":

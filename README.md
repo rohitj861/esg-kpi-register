@@ -8,7 +8,7 @@ Output goes to the console, CSV, JSON, a standalone HTML page, and a Supabase
 database.
 
 ```
-python esg_register.py GOOGL AAPL AMZN NVDA --to-supabase --html register.html
+python esg_register.py GOOGL MSFT AAPL AMZN NVDA --to-supabase --html register.html
 ```
 
 ---
@@ -22,8 +22,8 @@ and `source_url` travel with every value all the way into the database.
 
 The same principle drives the extraction rules. Where a company does not publish
 a metric, the cell is left **empty** rather than filled with the nearest similar
-number. Apple's "waste diverted from landfill" is not "waste generated"; Apple's
-supply-chain renewable electricity is ten times its own. A blank cell is
+number. Apple's supply-chain renewable electricity is ten times its own;
+Microsoft's non-renewable fuel is not its energy consumption. A blank cell is
 recoverable. A wrong number that looks plausible is not.
 
 ---
@@ -71,7 +71,7 @@ The SEC rate-limits or blocks clients that do not identify themselves. Set
 | File | Does |
 |---|---|
 | `annual_report.py` | Resolve a company to its latest 10-K on EDGAR; extract revenue, net income, total assets, headcount |
-| `sustainability_report.py` | Locate and download a sustainability report; extract emissions, water, waste, energy |
+| `sustainability_report.py` | Locate and download a sustainability report; extract emissions, energy, water, renewable share |
 | `esg_register.py` | Run both, join them, write CSV / JSON / HTML, push to Supabase |
 | `supabase_sync.py` | The database writer; run alone as a connection test |
 | `esg_common.py` | Shared parsing: number reading, year-column alignment, unit conversion |
@@ -110,7 +110,14 @@ python sustainability_report.py ACME --page https://acme.com/sustainability
 `--page` scrapes a landing page for candidate report PDFs and picks the
 best-looking one.
 
-The built-in registry covers **GOOGL, GOOG, AAPL, AMZN, NVDA**.
+The built-in registry covers **GOOGL, GOOG, MSFT, AAPL, AMZN, NVDA**.
+
+Microsoft is the one entry that does not point at the headline report. It
+publishes two documents — a narrative *Environmental Sustainability Report* and
+an *Environmental Data Fact Sheet* — and only the fact sheet carries extractable
+tables; the narrative PDF yields no KPI rows at all. Its landing page builds the
+download links in JavaScript, so step 3 below has nothing to scrape and the
+recorded URL plus the year-bump are the only routes to a new edition.
 
 #### The registry heals itself
 
@@ -141,7 +148,7 @@ a change no amount of year-bumping alone would have caught.
 ### The full register
 
 ```bash
-python esg_register.py GOOGL AAPL AMZN NVDA \
+python esg_register.py GOOGL MSFT AAPL AMZN NVDA \
     --csv register.csv --json register.json --html register.html --to-supabase
 
 # a company not in the registry
@@ -161,18 +168,38 @@ python esg_register.py TSLA --sustainability-url https://…/impact-report.pdf -
 | Metric | Canonical unit |
 |---|---|
 | Scope 1, Scope 2 (market-based), Scope 2 (location-based), Scope 3 | tCO2e |
-| Water withdrawal, Water consumption | m³ |
-| Waste generated, Waste diverted | metric tons |
-| Waste diversion rate | % |
-| Energy consumption, Renewable electricity | MWh |
+| Energy consumption | MWh |
+| Water withdrawal | m³ |
+| Renewable energy share | % |
 
 Units are normalised on ingest. Publishers disagree wildly — Google reports
-water in million gallons, Apple waste in pounds, Amazon emissions in MMT CO₂e —
-so conversions are applied and recorded in the value's `note` field
+water in million gallons, NVIDIA emissions on a fiscal year, Amazon emissions in
+MMT CO₂e — so conversions are applied and recorded in the value's `note` field
 (`converted from Million gallons`).
 
-Scope 2 is reported on both bases where a company publishes both. Most publish
-only one.
+The register publishes these seven and nothing else. Extraction still finds more
+— renewable electricity in MWh is read only to derive a share — but
+`esg_common.REGISTER_METRICS` is the single list every writer filters through,
+so nothing reaches the CSV, the JSON, the database or the page without being on
+it.
+
+Scope 2 appears on **both bases**. Market-based reflects the electricity a
+company contracted for, location-based what the grid it drew from actually
+emitted, and the gap between them is the whole argument about corporate
+renewable procurement — Microsoft's FY25 figures are 2.7 MtCO2e market-based
+against 12.0 MtCO2e location-based. Most publishers report only one.
+
+### Renewable energy share
+
+Taken as a percentage the company itself states — "Renewable electricity
+percentage", "Electricity procured from renewable sources %". Where a report
+prints only megawatt-hours, the share falls back to renewable electricity ÷
+energy consumption **for the same reporting year**, and the value carries a note
+saying so. That fallback is a floor rather than an exact figure, because the
+numerator is electricity while the denominator may include fuels; the note names
+both source pages so it can be checked. Where neither is available the cell
+stays empty — Amazon states its renewable share in prose and not in a data
+table, so Amazon has no value here.
 
 ---
 
@@ -184,6 +211,7 @@ Four tables plus two views in the Supabase project **Company Data**.
 |---|---|
 | `companies` | Issuer, ticker, CIK |
 | `metrics` | Controlled vocabulary of KPIs, so names cannot drift between runs |
+| `metrics.active` | False for a metric the register has retired. Both views filter on it |
 | `source_documents` | The exact document, its fiscal year, URL, filing date |
 | `kpi_values` | Value, unit, reporting year, **page**, extraction note |
 | `esg_register` | Flattened view of everything, including superseded editions |
@@ -193,6 +221,11 @@ Writes are upserts keyed on `(company, document, metric)`, so re-running an
 extraction refreshes values in place. A **new report edition creates a new
 `source_documents` row**, which means last year's figures survive rather than
 being overwritten — Apple's 2025 and 2026 reports both sit in the database.
+Retiring a metric is a flag rather than a delete, for the same reason: a
+`kpi_values` row is traced to a page of one report edition and cannot be
+recreated without re-running the extraction, so `active = false` hides it from
+both views and setting the flag back brings the history with it.
+
 That is why `esg_register_current` exists: a plain query over `kpi_values` would
 mix editions.
 
@@ -235,18 +268,24 @@ Notes you will see:
 
 ## Known limits
 
-**Sustainability report discovery is the weak point.** Microsoft publishes no
-discoverable PDF (its reports hub links only pre-2021 device reports); Meta's
-site exposes no PDF links; Tesla returns 403 to automated requests. These need a
-manual `--url`.
+**Sustainability report discovery is the weak point.** Microsoft's reports hub
+builds its links in JavaScript and scrapes to nothing, so its registry entry
+carries a hard-coded fact-sheet URL; Meta's site exposes no PDF links; Tesla
+returns 403 to automated requests. These need a manual `--url`.
+
+**Apple's CDN rate-limits repeated downloads.** Its report is 23 MB, and after
+several fetches in a session `apple.com` starts returning 403 to both HEAD and
+GET — resolution then fails and the run reports it rather than inventing a
+figure. It clears on its own; re-run later, or pass `--file` against the copy in
+`reports/`. Do not work around it by disguising the user agent.
 
 **Some companies simply do not publish some metrics.** Amazon discloses water
-and waste only as narrative percentages, never absolute figures — verified
+and its renewable share only as narrative prose, never as a table row — verified
 across its 2024 and 2025 reports. No parser change fixes that.
 
-**Google's renewable electricity** exists as an unlabelled *column* in a
+**Google's renewable electricity in MWh** exists as an unlabelled *column* in a
 renewable/non-renewable split rather than a year-keyed row, so it is not
-extracted. Reading it would require column-header awareness.
+extracted. Its renewable *share* is read from a different row and is unaffected.
 
 **Scanned or image-only PDFs** will not work; extraction is text-based, with no OCR.
 

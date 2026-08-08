@@ -17,15 +17,13 @@ import sys
 
 import annual_report
 import sustainability_report
-from esg_common import full
-
-FINANCIAL_METRICS = ["Revenue", "Net income", "Total assets", "Employees"]
-ENVIRONMENTAL_METRICS = [
-    "Scope 1", "Scope 2 (market-based)", "Scope 3",
-    "Water withdrawal", "Water consumption",
-    "Waste generated", "Waste diverted", "Waste diversion rate",
-    "Energy consumption", "Renewable electricity",
-]
+from esg_common import (
+    ENVIRONMENTAL_METRICS,
+    FINANCIAL_METRICS,
+    REGISTER_METRICS,
+    full,
+    kind_of,
+)
 
 
 def build_row(company, sustainability_url=None, sustainability_file=None,
@@ -98,14 +96,15 @@ def print_console(rows):
             src = row["sources"].get(key)
             if src:
                 print(f"  {key:<14} {src['title']}")
-        for label in FINANCIAL_METRICS + ENVIRONMENTAL_METRICS:
+        for label in REGISTER_METRICS:
             m = row["metrics"].get(label)
             if m is None:
                 print(f"    {label + ':':<26} —")
                 continue
             page = f"p.{m.page}" if m.page else ""
             flag = "  ⚠ " + m.note if m.note else ""
-            print(f"    {label + ':':<26} {full(m.value):>18} {m.unit:<10} {m.year or '':<6} {page}{flag}")
+            print(f"    {label + ':':<26} {full(m.value, m.unit):>18} {m.unit:<10} "
+                  f"{m.year or '':<6} {page}{flag}")
         for err in row["errors"]:
             print(f"    ! {err}")
 
@@ -118,12 +117,11 @@ def write_csv(rows, path):
              "source_document", "page", "source_url", "note"]
         )
         for row in rows:
-            for label in FINANCIAL_METRICS + ENVIRONMENTAL_METRICS:
+            for label in REGISTER_METRICS:
                 m = row["metrics"].get(label)
                 if m is None:
                     continue
-                key = "financial" if label in FINANCIAL_METRICS else "environmental"
-                src = row["sources"].get(key, {})
+                src = row["sources"].get(kind_of(label), {})
                 writer.writerow([
                     row["company"], row["ticker"], label,
                     int(m.value) if m.value is not None and float(m.value).is_integer() else m.value,
@@ -140,7 +138,11 @@ def write_json(rows, path):
             "company": row["company"],
             "ticker": row["ticker"],
             "sources": row["sources"],
-            "metrics": {label: m.as_row() for label, m in row["metrics"].items()},
+            "metrics": {
+                label: row["metrics"][label].as_row()
+                for label in REGISTER_METRICS
+                if label in row["metrics"]
+            },
             "errors": row["errors"],
         })
     with open(path, "w", encoding="utf-8") as fh:
@@ -189,15 +191,14 @@ def write_html(rows, path):
         m = row["metrics"].get(label)
         if m is None:
             return '<td class="num miss">—</td>'
-        key = "financial" if label in FINANCIAL_METRICS else "environmental"
-        src = row["sources"].get(key)
+        src = row["sources"].get(kind_of(label))
         link = page_link(m, src)
         page = f"p.{m.page}" if m.page else "source"
         prov = f'<a href="{html.escape(link)}" target="_blank" rel="noopener">{page} ↗</a>' if link else page
         year = m.year or "—"
         flag = f'<div class="flag">⚠ {html.escape(m.note)}</div>' if m.note else ""
         return (
-            f'<td class="num"><span class="val">{full(m.value)}</span>'
+            f'<td class="num"><span class="val">{full(m.value, m.unit)}</span>'
             f'<div class="unit">{html.escape(m.unit)}</div>'
             f'<div class="prov">{year} · {prov}</div>{flag}</td>'
         )
@@ -207,7 +208,7 @@ def write_html(rows, path):
         name = html.escape(row["company"])
         ticker = html.escape(row["ticker"])
         errs = "".join(f'<div class="err">{html.escape(e)}</div>' for e in row["errors"])
-        cells = "".join(cell(row, l) for l in FINANCIAL_METRICS + ENVIRONMENTAL_METRICS)
+        cells = "".join(cell(row, l) for l in REGISTER_METRICS)
         body.append(
             f'<tr><td class="co">{name}<small>{ticker}</small>{errs}</td>{cells}</tr>'
         )
@@ -221,7 +222,7 @@ def write_html(rows, path):
   <div class="eyebrow">Primary-source data</div>
   <h1>Sustainability KPIs, traced to the filing.</h1>
   <p class="lede">Every figure is extracted from the company's own annual and
-  sustainability reports. {len(rows)} companies, {len(FINANCIAL_METRICS) + len(ENVIRONMENTAL_METRICS)} metrics.
+  sustainability reports. {len(rows)} companies, {len(REGISTER_METRICS)} metrics.
   Each value links to its source page.</p>
   <div class="scroll">
   <table>
@@ -237,7 +238,10 @@ def write_html(rows, path):
   Form 10-K and environmental figures from a separate sustainability report. The two
   are published on different cycles, so a company's emissions year usually trails its
   financial year. Each cell states the year the figure belongs to; do not read a row
-  as a single period. Scope 2 is market-based where the company reports both.</p>
+  as a single period. Scope 2 is market-based where the company reports both.
+  Renewable energy share is the percentage the company itself publishes; where it
+  reports only megawatt-hours, the share is renewable electricity over reported
+  energy consumption for the same year and the cell is flagged as derived.</p>
 </div>
 """
     with open(path, "w", encoding="utf-8") as fh:

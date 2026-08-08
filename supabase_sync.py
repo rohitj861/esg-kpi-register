@@ -14,8 +14,7 @@ import urllib.error
 import urllib.request
 
 import config
-
-FINANCIAL_METRICS = ["Revenue", "Net income", "Total assets", "Employees"]
+from esg_common import REGISTER_METRICS, kind_of
 
 
 def _request(method, path, payload=None, prefer=None, params=""):
@@ -89,8 +88,13 @@ def push_row(row):
 
     values = []
     for label, metric in row["metrics"].items():
-        kind = "financial" if label in FINANCIAL_METRICS else "environmental"
-        document = documents.get(kind)
+        # Extraction finds more than the register publishes — renewable
+        # electricity in megawatt-hours is read only to derive a share. Those are
+        # working values, not KPIs, and writing them would put them straight
+        # back on the page, which reads the database rather than this list.
+        if label not in REGISTER_METRICS:
+            continue
+        document = documents.get(kind_of(label))
         if document is None or metric.value is None:
             continue
         values.append({
